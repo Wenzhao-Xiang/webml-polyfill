@@ -31,6 +31,9 @@ export default class Model {
    * Indicate that we have finished modifying a model.
    */
   async finish() {
+    if (arguments.length != 0) {
+      throw new Error(`Sets ${arguments.length} arguments when needing 0 arguments`);
+    }
     if (this._completed) {
       throw new Error('finish called more than once');
     }
@@ -110,7 +113,7 @@ export default class Model {
    */
   addOperation(type, inputs, outputs) {
     if (this._completed) {
-      throw new Error('addOperation cant modify after model finished');
+      throw new Error(`addOperation cant modify after model finished`);
     }
     
     if (!this._validateOperationCode(type)) {
@@ -151,7 +154,7 @@ export default class Model {
       throw new Error(`Invalid outputs ${outputs}`);
     }
     if (!this._validateInputandOutput(inputs, outputs)) {
-      throw new Error("The output can't be equal to input");
+      throw new Error(`The output can't be equal to input`);
     }
     this._inputs = inputs;
     this._inputs.forEach(i => {
@@ -173,18 +176,18 @@ export default class Model {
     }
     if (type === OperandCode.TENSOR_QUANT8_ASYMM) {
       if (typeof options.dimensions === 'undefined') {
-        console.error('dimensions is undefined');
+        console.error(`dimensions is undefined`);
         return false;
       }
       if (typeof options.zeroPoint === 'undefined') {
-        console.error('zeroPoint is undefined');
+        console.error(`zeroPoint is undefined`);
         return false;
       } else if (options.zeroPoint < 0 || options.zeroPoint > 255) {
         console.error(`Invalid zeroPoint value ${options.zeroPoint}`);
         return false;
       }
       if (typeof options.scale === 'undefined') {
-        console.error('scale is undefined');
+        console.error(`scale is undefined`);
         return false;
       } else if (options.scale < 0.0) {
         console.error(`Invalid scale ${options.scale}`);
@@ -192,12 +195,12 @@ export default class Model {
       }
     } else if (type === OperandCode.TENSOR_FLOAT32) {
       if (typeof options.dimensions === 'undefined') {
-        console.error('dimensions is undefined');
+        console.error(`dimensions is undefined`);
         return false;
       }
     } else if (type === OperandCode.TENSOR_INT32) {
       if (typeof options.dimensions === 'undefined') {
-        console.error('dimensions is undefined');
+        console.error(`dimensions is undefined`);
         return false;
       }
     }
