@@ -141,11 +141,17 @@ export default class Model {
    * @param {number[]} outputs - An array of indexes identifying the output operands.
    */
   identifyInputsAndOutputs(inputs, outputs) {
+    if (arguments.length != 2) {
+      throw new Error(`Sets ${arguments.length} arguments when needing 2 arguments`);
+    }
     if (!this._validateOperandList(inputs)) {
       throw new Error(`Invalid inputs ${inputs}`);
     }
     if (!this._validateOperandList(outputs)) {
       throw new Error(`Invalid outputs ${outputs}`);
+    }
+    if (!this._validateInputandOutput(inputs, outputs)) {
+      throw new Error("The output can't be equal to input");
     }
     this._inputs = inputs;
     this._inputs.forEach(i => {
@@ -229,6 +235,23 @@ export default class Model {
     let ret = true;
     list.forEach(index => {if (index >= this._operands) ret = false;})
     return ret;
+  }
+
+  _validateInputandOutput(inputs, outputs) {
+    let tempArray1 = [];
+
+    for (let i = 0; i < outputs.length; i++) {
+      if (!tempArray1.hasOwnProperty(inputs[i])) {
+        tempArray1[outputs[i]] = true;
+      }
+    }
+
+    for (let i = 0; i < inputs.length; i++) {
+        if(tempArray1[inputs[i]]){
+          return false;
+        }
+    }
+    return true;
   }
 
   _sortIntoRunOrder() {
