@@ -57,6 +57,10 @@ export default class Model {
       throw new Error('addOperand cant modify after model finished');
     }
 
+    if (arguments.length > 1) {
+      throw new Error('Can only add one operand');
+    }
+
     if (!this._validateOperandOptions(options)) {
       throw new Error('Invalid options');
     }
@@ -162,6 +166,10 @@ export default class Model {
       return false;
     }
     if (type === OperandCode.TENSOR_QUANT8_ASYMM) {
+      if (typeof options.dimensions === 'undefined') {
+        console.error('dimensions is undefined');
+        return false;
+      }
       if (typeof options.zeroPoint === 'undefined') {
         console.error('zeroPoint is undefined');
         return false;
@@ -169,8 +177,21 @@ export default class Model {
         console.error(`Invalid zeroPoint value ${options.zeroPoint}`);
         return false;
       }
-      if (options.scale < 0.0) {
+      if (typeof options.scale === 'undefined') {
+        console.error('scale is undefined');
+        return false;
+      } else if (options.scale < 0.0) {
         console.error(`Invalid scale ${options.scale}`);
+        return false;
+      }
+    } else if (type === OperandCode.TENSOR_FLOAT32) {
+      if (typeof options.dimensions === 'undefined') {
+        console.error('dimensions is undefined');
+        return false;
+      }
+    } else if (type === OperandCode.TENSOR_INT32) {
+      if (typeof options.dimensions === 'undefined') {
+        console.error('dimensions is undefined');
         return false;
       }
     }
