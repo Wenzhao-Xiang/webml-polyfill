@@ -1170,6 +1170,7 @@ export const OperationCode = {
    * * 0: The output tensor of same shape as input0.
    */
   TANH: 28,
+  MAXIMUM: 55,
 };
 
 export const ResultCode = {

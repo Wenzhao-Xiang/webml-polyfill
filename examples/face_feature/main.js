@@ -1,5 +1,5 @@
-const face_onnx = {
-  modelName: 'SqueezeNet(Onnx)',
+const face_landmark_onnx = {
+  modelName: 'Face Landmark Detec.(Onnx)',
   modelFile: './model/landmark.onnx',
   inputSize: [128, 128, 3],
   outputSize: 136,
@@ -9,10 +9,14 @@ const face_onnx = {
   },
 };
 const face_tflite = {
-  modelName: 'Mobilenet V1(TFlite)',
-  inputSize: [128, 128, 3],
-  outputSize: 136,
-  modelFile: './model/face.tflite',
+  modelName: 'Face Detec.(TFlite)',
+  inputSize: [416, 416, 3],
+  outputSize: 1 * 13 * 13 * 30,
+  modelFile: './model/yolov2_tiny-face.tflite',
+  preOptions: {
+    // mean and std should also be in BGR order
+    norm: true,
+  },
 };
 
 const preferMap = {
@@ -238,7 +242,9 @@ function main(camera) {
     console.log(`Inference time: ${result.time} ms`);
     let inferenceTimeElement = document.getElementById('inferenceTime');
     inferenceTimeElement.innerHTML = `inference time: <em style="color:green;font-weight:bloder;">${result.time} </em>ms`;
-    drawOutput(canvasElement2, result.classes);
+    console.log(result.classes);
+    decodeYOLOv2(result.classes, img_width, img_height);
+    // drawOutput(canvasElement2, result.classes);
   }
 
   function drawOutput(canvas, keypoints) {
@@ -283,7 +289,7 @@ function main(camera) {
     if (nnNative) {
       currentBackend = 'WebML';
     } else {
-      currentBackend = 'WASM';
+      currentBackend = 'WebGL';
     }
   }
 

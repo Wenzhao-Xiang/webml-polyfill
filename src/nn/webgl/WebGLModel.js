@@ -269,6 +269,12 @@ export default class WebGLModel {
         output.assign(activation(
             tf.matMul(input.reshape([batchSize, -1]), weights, false, true).add(bias)));
       } break;
+      case OperationCode.MAXIMUM: {
+        const in1 = operands[inputs[0]];
+        const in2 = operands[inputs[1]];
+        const output = operands[outputs[0]];
+        output.assign(tf.maximum(in1, in2));
+      } break;
       default: {
         throw new Error(`Operation ${op} is not supported`);
       }
