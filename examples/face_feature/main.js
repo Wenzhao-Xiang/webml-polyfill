@@ -1,11 +1,11 @@
-const face_landmark_onnx = {
-  modelName: 'Face Landmark Detec.(Onnx)',
-  modelFile: './model/landmark.onnx',
+const face_landmark_tflite = {
+  modelName: 'Face Landmark(tflite)',
+  modelFile: './model/face_landmark.tflite',
   inputSize: [128, 128, 3],
   outputSize: 136,
   preOptions: {
     // mean and std should also be in BGR order
-    channelScheme: 'BGR',
+    // norm: true,
   },
 };
 const face_tflite = {
@@ -26,9 +26,10 @@ const preferMap = {
   'fast': 'BNNS',
 };
 
-function main(camera) {
+async function main(camera) {
   const availableModels = [
     face_tflite,
+    face_landmark_tflite,
   ];
 
   const videoElement = document.getElementById('video');
@@ -41,6 +42,7 @@ function main(camera) {
   const webgl = document.getElementById('webgl');
   const webml = document.getElementById('webml');
   const canvasElement = document.getElementById('canvas');
+  const canvasElement1 = document.getElementById('canvas1');
   const canvasElement2 = document.getElementById('outputCanvas');
   const progressContainer = document.getElementById('progressContainer');
   const progressBar = document.getElementById('progressBar');
@@ -52,6 +54,7 @@ function main(camera) {
   let streaming = false;
 
   let utils = new Utils(canvasElement);
+  let utils1 = new Utils(canvasElement1);
   utils.updateProgress = updateProgress;    //register updateProgress function if progressBar element exist
 
   function checkPreferParam() {
@@ -237,27 +240,32 @@ function main(camera) {
       }
     }
   }
-
+  //this.canvasContext.drawImage(imageSource, 94, 0,  face_1
+   // 368,
+   // 333, 0, 0, 128, 128);
+  // this.canvasContext.drawImage(imageSource, 31, 0,  face_2
+   // 412,
+   // 347, 0, 0, 128, 128);
+  // this.canvasContext.drawImage(imageSource, 5, 18,  face_6
+  //  629,
+  //  650, 0, 0, 128, 128);
+  //this.canvasContext.drawImage(imageSource, 152, 4,  face_7
+  //  70,
+  //  70, 0, 0, 128, 128);
   function updateResult(result) {
     console.log(`Inference time: ${result.time} ms`);
     let inferenceTimeElement = document.getElementById('inferenceTime');
     inferenceTimeElement.innerHTML = `inference time: <em style="color:green;font-weight:bloder;">${result.time} </em>ms`;
-    console.log(result.classes);
-    decodeYOLOv2(result.classes, img_width, img_height);
-    // drawOutput(canvasElement2, result.classes);
-  }
-
-  function drawOutput(canvas, keypoints) {
-    console.log(canvas);
-    ctx = canvas.getContext('2d');
-    console.log(ctx);
-    ctx.drawImage(imageElement, 0, 0, 128, 128);
-    for (let i = 0; i < 128; i = i + 2) {
-      ctx.beginPath();
-      ctx.fillStyle = "red";
-      ctx.arc(keypoints[i]*128, keypoints[i+1]*128, 2, 0, 2 * Math.PI);
-      ctx.stroke();
+    if (imageElement) {
+      console.log(result.classes);
+      // drawKeyPoints(imageElement, canvasElement2, result.classes);
+      let out = decodeYOLOv2(result.classes, imageElement.width, imageElement.height);
+      drawOutput(imageElement, canvasElement2, out, imageElement.width, imageElement.height);
+    } else {
+      let out = decodeYOLOv2(result.classes, videoElement.videoWidth, videoElement.videoHeight);
+      drawOutput(videoElement, canvasElement2, out, videoElement.videoWidth, videoElement.videoHeight);
     }
+
   }
  
   if (nnNative) {
@@ -307,6 +315,7 @@ function main(camera) {
       currentModel = model.modelName;
     }
   }
+  utils1.changeModelParam(face_landmark_tflite);
 
   // register prefers
   if (getOS() === 'Mac OS' && currentBackend === 'WebML') {
@@ -333,53 +342,87 @@ function main(camera) {
       }
     }, false);
 
-    imageElement.onload = function() {
-      utils.predict(imageElement).then(ret => updateResult(ret));
+    imageElement.onload = async function() {
+      let result = await utils.predict(imageElement); //.then(ret => {
+        let out = decodeYOLOv2(result, imageElement.width, imageElement.height);
+        let face_boxes = getFaceBoxes(out, imageElement.width, imageElement.height);
+        let keyPoints = [];
+        for (let i = 0; i< face_boxes.length; ++i) {
+          let tmp = await utils1.predict(imageElement, face_boxes[i]);
+          keyPoints.push(tmp);
+        }
+        drawFaceBoxes(imageElement, canvasElement2, face_boxes);
+        drawKeyPoints(canvasElement2, keyPoints, face_boxes);
+        // updateResult(ret);
+      //});
     }
-    utils.init(currentBackend, currentPrefer).then(() => {
-      updateBackend();
-      updateModel();
-      updatePrefer();
-      utils.predict(imageElement).then(ret => updateResult(ret));
+    await utils.init(currentBackend, currentPrefer);// .then(() => {
+    await utils1.init(currentBackend, currentPrefer);
+    updateBackend();
+    updateModel();
+    updatePrefer();
+    let result = await utils.predict(imageElement); //.then(ret => {
+        let out = decodeYOLOv2(result, imageElement.width, imageElement.height);
+        let face_boxes = getFaceBoxes(out, imageElement.width, imageElement.height);
+        let keyPoints = [];
+        for (let i = 0; i< face_boxes.length; ++i) {
+          let tmp = await utils1.predict(imageElement, face_boxes[i]);
+          keyPoints.push(tmp);
+        }
+        drawFaceBoxes(imageElement, canvasElement2, face_boxes);
+        drawKeyPoints(canvasElement2, keyPoints, face_boxes);
+        // updateResult(ret);
+      // });
       buttonEelement.setAttribute('class', 'btn btn-primary');
       inputElement.removeAttribute('disabled');
-    }).catch((e) => {
-      console.warn(`Failed to init ${utils.model._backend}, try to use WASM`);
-      console.error(e);
-      showAlert(utils.model._backend);
-      changeBackend('WASM');
-    });
+    //}).catch((e) => {
+    //  console.warn(`Failed to init ${utils.model._backend}, try to use WASM`);
+    //  console.error(e);
+    //  showAlert(utils.model._backend);
+    //  changeBackend('WASM');
+    //});
   } else {
     let stats = new Stats();
     stats.dom.style.cssText = 'position:fixed;top:60px;left:10px;cursor:pointer;opacity:0.9;z-index:10000';
     stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
     document.body.appendChild(stats.dom);
 
-    navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: "environment"}}).then((stream) => {
+    navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: "environment"}}).then(async function(stream) {
       video.srcObject = stream;
-      utils.init(currentBackend, currentPrefer).then(() => {
+      await utils.init(currentBackend, currentPrefer);// .then(() => {
+      await utils1.init(currentBackend, currentPrefer);
         updateBackend();
         updateModel();
         updatePrefer();
         streaming = true;
         startPredict();
-      }).catch((e) => {
-        console.warn(`Failed to init ${utils.model._backend}, try to use WASM`);
-        console.error(e);
-        showAlert(utils.model._backend);
-        changeBackend('WASM');
-      });
+      //}).catch((e) => {
+      //  console.warn(`Failed to init ${utils.model._backend}, try to use WASM`);
+       // console.error(e);
+       // showAlert(utils.model._backend);
+       // changeBackend('WASM');
+    //  });
     }).catch((error) => {
       console.log('getUserMedia error: ' + error.name, error);
     });
 
-    function startPredict() {
+    async function startPredict() {
       if (streaming) {
         stats.begin();
-        utils.predict(videoElement).then(ret => updateResult(ret)).then(() => {
+        //utils.predict(videoElement).then(ret => updateResult(ret)).then(() => {
+          let result = await utils.predict(videoElement); //.then(ret => {
+        let out = decodeYOLOv2(result, videoElement.videoWidth, videoElement.videoHeight);
+        let face_boxes = getFaceBoxes(out, videoElement.videoWidth, videoElement.videoHeight);
+        let keyPoints = [];
+        for (let i = 0; i< face_boxes.length; ++i) {
+          let tmp = await utils1.predict(videoElement, face_boxes[i]);
+          keyPoints.push(tmp);
+        }
+        drawFaceBoxes(videoElement, canvasElement2, face_boxes);
+        drawKeyPoints(canvasElement2, keyPoints, face_boxes);
           stats.end();
           setTimeout(startPredict, 0);
-        });
+        //});
       }
     }
   }

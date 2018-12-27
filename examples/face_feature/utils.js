@@ -55,19 +55,26 @@ class Utils {
     this.initialized = true;
   }
 
-  async predict(imageSource) {
+  async predict(imageSource, box) {
     if (!this.initialized) return;
+    if (!box) {
     this.canvasContext.drawImage(imageSource, 0, 0,
                                  this.canvasElement.width,
                                  this.canvasElement.height);
+    } else {
+      this.canvasContext.drawImage(imageSource, box[0], box[2], box[1]-box[0], box[3]-box[2],
+        0,0,
+        this.canvasElement.width,
+        this.canvasElement.height);
+    }
     this.prepareInputTensor(this.inputTensor, this.canvasElement);
     let start = performance.now();
     let result = await this.model.compute(this.inputTensor, this.outputTensor);
     let elapsed = performance.now() - start;
-    return {
-      time: elapsed.toFixed(2),
-      classes: this.outputTensor
-    };
+    console.log(`Inference time: ${elapsed.toFixed(2)} ms`);
+    let inferenceTimeElement = document.getElementById('inferenceTime');
+    inferenceTimeElement.innerHTML = `inference time: <em style="color:green;font-weight:bloder;">${elapsed.toFixed(2)} </em>ms`;
+    return this.outputTensor;
   }
 
   async loadModel(modelUrl) {
