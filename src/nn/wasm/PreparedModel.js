@@ -660,6 +660,19 @@ export default class PreparedModel {
         outSizeShape.delete();
         nn_ops._free(outSizeData);
       } break;
+      case OperationCode.MAXIMUM: {
+        allParametersPresent(2, 1);
+        let in1 = operands[inputs[0]];
+        let in2 = operands[inputs[1]];
+        let out = operands[outputs[0]];
+
+        // Error check
+        OPS_CHECK(in1.type === in2.type);
+        
+        nn_ops.maximumFloat32(in1.runtimeshape, in1.value,
+                              in2.runtimeshape, in2.value,
+                              out.runtimeshape, out.value);
+      } break;
       default: {
         throw new Error(`Operation ${op} is not supported`);
       }

@@ -14,6 +14,17 @@ using namespace emscripten;
 using namespace tflite;
 
 namespace binding_utils {
+  template<typename T>
+  void Maximum(const RuntimeShape& input1_shape, const T* input1_data,
+               const T* input2_data, const RuntimeShape& output_shape,
+               T* output_data) {
+    gemmlowp::ScopedProfilingLabel label("TensorFlowMaximum");
+    auto input1_map = optimized_ops::MapAsVector(input1_data, input1_shape);
+    auto output_map = optimized_ops::MapAsVector(output_data, output_shape);
+    auto max_value = optimized_ops::MapAsVector(input2_data, output_shape);
+    output_map.array() = input1_map.array().max(max_value.array());
+  }
+
   // Operation wrappers.
   bool addFloat32Wrapper(const ArithmeticParams& op_params,
                          const RuntimeShape& input1_shape, 
@@ -188,6 +199,16 @@ namespace binding_utils {
                                   outputShape, (float*)outputData);
   }
 
+  bool maximumFloat32Wrapper(const RuntimeShape& input1_shape, 
+                             const intptr_t input1_data,
+                             const RuntimeShape& input2_shape,
+                             const intptr_t input2_data, 
+                             const RuntimeShape& output_shape,
+                             intptr_t output_data) {
+    binding_utils::Maximum(input1_shape, (const float*)input1_data,
+                           (const float*)input2_data,
+                           output_shape, (float*) output_data);
+  }
 }
 
 EMSCRIPTEN_BINDINGS(nn)
@@ -284,6 +305,7 @@ EMSCRIPTEN_BINDINGS(nn)
   function("concatenationFloat32", &binding_utils::concatenationFloat32Wrapper, allow_raw_pointers());
   function("fullyConnectedFloat32", &binding_utils::fullyConnectedFloat32Wrapper, allow_raw_pointers());
   function("resizeBilinearFloat32", &binding_utils::resizeBilinearFloat32Wrapper, allow_raw_pointers());
+  function("maximumFloat32", &binding_utils::maximumFloat32Wrapper, allow_raw_pointers());
 
   // TODO: operation wrappers
   /*
