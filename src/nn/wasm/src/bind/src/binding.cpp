@@ -14,6 +14,23 @@ using namespace emscripten;
 using namespace tflite;
 
 namespace binding_utils {
+  // help functions
+  val getPerm(const TransposeParams& op_params) {
+    emscripten::val js_dims = emscripten::val::array();
+    for (int i = 0; i < 4; i++) {
+      js_dims.call<void>("push", op_params.perm[i]);
+    }
+    return js_dims;
+  };
+
+  void setPerm(TransposeParams& op_params, val js_dims) {
+    std::vector<int32_t> tmp = vecFromJSArray<int32_t>(js_dims);
+    for (int i = 0; i < tmp.size(); ++i) {
+      op_params.perm[i] = tmp.at(i);
+    }
+  };
+
+
   // Operation wrappers.
   bool addFloat32Wrapper(const ArithmeticParams& op_params,
                          const RuntimeShape& input1_shape, 
@@ -188,6 +205,29 @@ namespace binding_utils {
                                   outputShape, (float*)outputData);
   }
 
+  bool batchToSpaceNDFloat32Wrapper(const RuntimeShape& unextended_input1_shape, 
+                                    const intptr_t input1_data,
+                                    const RuntimeShape& unextended_input2_shape, 
+                                    const intptr_t block_shape_data,
+                                    const RuntimeShape& unextended_input3_shape, 
+                                    const intptr_t crops_data,
+                                    const RuntimeShape& unextended_output_shape, 
+                                    intptr_t output_data) {
+    optimized_ops::BatchToSpaceND(unextended_input1_shape, (const float*) input1_data,
+                                  unextended_input2_shape, (const int32_t*) block_shape_data,
+                                  unextended_input3_shape, (const int32_t*) crops_data,
+                                  unextended_output_shape, (float*) output_data);
+  }
+
+  bool transposeFloat32Wrapper(const TransposeParams& op_params,
+                               const RuntimeShape& unextended_input_shape, 
+                               const intptr_t input_data,
+                               const RuntimeShape& unextended_output_shape, 
+                               intptr_t output_data) {
+    optimized_ops::Transpose(op_params,
+                             unextended_input_shape, (const float*) input_data,
+                             unextended_output_shape, (float*) output_data);
+  }
 }
 
 EMSCRIPTEN_BINDINGS(nn)
@@ -265,6 +305,12 @@ EMSCRIPTEN_BINDINGS(nn)
     .field("float_activation_max", &ArithmeticParams::float_activation_max)
     ;
 
+  class_<TransposeParams>("TransposeParams")
+    .constructor<>()
+    .property("perm", &binding_utils::getPerm, &binding_utils::setPerm)
+    .property("perm_count", &TransposeParams::perm_count)
+    ;
+
   register_vector<RuntimeShape*>("VectorShape");
   register_vector<intptr_t>("VectorPtr");
 
@@ -284,6 +330,8 @@ EMSCRIPTEN_BINDINGS(nn)
   function("concatenationFloat32", &binding_utils::concatenationFloat32Wrapper, allow_raw_pointers());
   function("fullyConnectedFloat32", &binding_utils::fullyConnectedFloat32Wrapper, allow_raw_pointers());
   function("resizeBilinearFloat32", &binding_utils::resizeBilinearFloat32Wrapper, allow_raw_pointers());
+  function("batchToSpaceNDFloat32", &binding_utils::batchToSpaceNDFloat32Wrapper, allow_raw_pointers());
+  function("transposeFloat32", &binding_utils::transposeFloat32Wrapper, allow_raw_pointers());
 
   // TODO: operation wrappers
   /*
