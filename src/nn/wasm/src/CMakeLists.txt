@@ -19,5 +19,5 @@ set(SOURCES
 
 add_executable(nn_ops ${SOURCES})
 set_property(TARGET nn_ops PROPERTY CXX_STANDARD 11)
-set_target_properties(nn_ops PROPERTIES LINK_FLAGS "-s WASM=1 -s NO_FILESYSTEM=1 -s ALLOW_MEMORY_GROWTH=1 -s SINGLE_FILE=1 -s MODULARIZE=1 --memory-init-file 0 --bind")
+set_target_properties(nn_ops PROPERTIES LINK_FLAGS "-s WASM=1 -s NO_FILESYSTEM=1 -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=4 -s TOTAL_MEMORY=268435456 -s SINGLE_FILE=1 -s MODULARIZE=1 -s EXPORT_NAME='nn_ops' --memory-init-file 0 --bind")
 

@@ -6,6 +6,7 @@
 #include "external/tensorflow/tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_float.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_uint8.h"
+#include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/multithreaded_conv.h"
 #include "fixedpoint/fixedpoint.h"
 #include "public/gemmlowp.h"
 
@@ -15,6 +16,7 @@
 
 using namespace emscripten;
 using namespace tflite;
+using namespace Eigen;
 
 namespace binding_utils {
   template<typename T>
@@ -152,6 +154,62 @@ namespace binding_utils {
                         im2colShape, (float*)im2colData);
   }
 
+  struct RefCountedEigenContext : public TfLiteExternalContext {
+    std::unique_ptr<Eigen::ThreadPoolInterface> thread_pool_wrapper;
+    std::unique_ptr<Eigen::ThreadPoolDevice> device;
+    int num_references = 0;
+  };
+
+  class EigenThreadPoolWrapper : public Eigen::ThreadPoolInterface {
+    public:
+      // Takes ownership of 'pool'
+      explicit EigenThreadPoolWrapper(Eigen::ThreadPool* pool) : pool_(pool) {}
+      ~EigenThreadPoolWrapper() override {}
+
+      void Schedule(std::function<void()> fn) override {
+        pool_->Schedule(std::move(fn));
+      }
+      int NumThreads() const override { return pool_->NumThreads(); }
+      int CurrentThreadId() const override { return pool_->CurrentThreadId(); }
+
+    private:
+      std::unique_ptr<Eigen::ThreadPool> pool_;
+  };
+
+  void InitDevice(TfLiteContext* context, RefCountedEigenContext* ptr) {
+    int num_threads = 4;
+    if (context->recommended_num_threads != -1) {
+      num_threads = context->recommended_num_threads;
+    }
+    ptr->device.reset();  // destroy before we invalidate the thread pool
+    ptr->thread_pool_wrapper.reset(
+        new EigenThreadPoolWrapper(new Eigen::ThreadPool(num_threads)));
+    ptr->device.reset(
+        new Eigen::ThreadPoolDevice(ptr->thread_pool_wrapper.get(), num_threads));
+  }
+
+  void multiConvFloat32Wrapper(const Eigen::ThreadPoolDevice& device, 
+                               const ConvParams& op_params, 
+                               const RuntimeShape& inputShape, 
+                               const intptr_t inputData, 
+                               const RuntimeShape& filterShape, 
+                               const intptr_t filterData, 
+                               const RuntimeShape& biasShape, 
+                               const intptr_t biasData, 
+                               const RuntimeShape& outputShape, 
+                               intptr_t outputData,
+                               const RuntimeShape& im2colShape, 
+                               intptr_t im2colData) {
+    // Eigen::ThreadPool pool(4);
+    // Eigen:ThreadPoolDevice device(&pool, 4);
+    multithreaded_ops::Conv(device, op_params, 
+                            inputShape, (const float*)inputData, 
+                            filterShape, (const float*)filterData, 
+                            biasShape, (const float*)biasData, 
+                            outputShape, (float*)outputData, 
+                            im2colShape, (float*)im2colData);
+  }
+
   void convUint8Wrapper(const ConvParams& op_params, 
                         const RuntimeShape& inputShape, 
                         const intptr_t inputData, 
@@ -164,7 +222,7 @@ namespace binding_utils {
                         const RuntimeShape& im2colShape, 
                         intptr_t im2colData) {
     static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
-    // gemm_context.set_max_num_threads(0);
+    gemm_context.set_max_num_threads(4);
     optimized_ops::Conv(op_params, 
                         inputShape, (const uint8_t*)inputData, 
                         filterShape, (const uint8_t*)filterData, 
@@ -319,6 +377,14 @@ EMSCRIPTEN_BINDINGS(nn)
     .function("SetDim", &RuntimeShape::SetDim)
     ;
 
+  class_<Eigen::ThreadPool>("ThreadPool")
+    .constructor<int>()
+    ;
+
+  class_<Eigen::ThreadPoolDevice>("ThreadPoolDevice")
+    .constructor<Eigen::ThreadPool*, int>()
+    ;
+
   value_object<PaddingValues>("PaddingValues")
     .field("width", &PaddingValues::width)
     .field("height", &PaddingValues::height)
@@ -436,6 +502,7 @@ EMSCRIPTEN_BINDINGS(nn)
   function("depthwiseConvFloat32", &binding_utils::depthwiseConvFloat32Wrapper, allow_raw_pointers());
   function("depthwiseConvUint8", &binding_utils::depthwiseConvUint8Wrapper, allow_raw_pointers());
   function("convFloat32", &binding_utils::convFloat32Wrapper, allow_raw_pointers());
+  function("multiConvFloat32", &binding_utils::multiConvFloat32Wrapper, allow_raw_pointers());
   function("convUint8", &binding_utils::convUint8Wrapper, allow_raw_pointers());
   function("averagePoolFloat32", &binding_utils::averagePoolFloat32Wrapper, allow_raw_pointers());
   function("averagePoolUint8", &binding_utils::averagePoolUin8Wrapper, allow_raw_pointers());

@@ -23,6 +23,8 @@ export default class PreparedModel {
       tensorValue: [],
       tensorShape: []
     };
+    this._pool;
+    this._device;
   }
 
   /**
@@ -38,6 +40,8 @@ export default class PreparedModel {
     this._preference = model._preference;
     this._supportedOps = model._supportedOps;
     this._eager = model._eager;
+    this._pool = new this._nn_ops.ThreadPool(4);
+    this._device = new this._nn_ops.ThreadPoolDevice(this._pool, 4);
 
     const graph = new Graph(operations.length);
     operations.forEach((op, i) => {
@@ -696,7 +700,7 @@ export default class PreparedModel {
         }
 
         if (output.type === OperandCode.TENSOR_FLOAT32) {
-          nn_ops.convFloat32(convParams, 
+          nn_ops.multiConvFloat32(this._device, convParams, 
                              input.runtimeshape, input.value, 
                              filter.runtimeshape, filter.value, 
                              bias.runtimeshape, bias.value, 
