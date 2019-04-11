@@ -46,13 +46,13 @@ logger.info('Build.SubModules', `(1/3) Cleaning dependencies folder... ${cleanIn
 
 // Step 2: Get dependencies (if needed)
 logger.info('Build.SubModules', '(2/3) Fetching submodules...');
-const update = spawnSync('git submodule update --init --recursive', {shell: true, stdio: 'inherit', cwd: ROOT});
-if (update.status !== 0) {
-  if (update.error) {
-    console.error(update.error);
-  }
-  process.exit(update.status);
-}
+// const update = spawnSync('git submodule update --init --recursive', {shell: true, stdio: 'inherit', cwd: ROOT});
+// if (update.status !== 0) {
+//   if (update.error) {
+//     console.error(update.error);
+//   }
+//   process.exit(update.status);
+// }
 logger.info('Build.SubModules', '(2/3) Fetching submodules... DONE');
 
 logger.info('Download tensorflow dependencies', '(3/3) Downloading... ');

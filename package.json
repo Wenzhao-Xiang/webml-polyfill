@@ -9,7 +9,7 @@
   "scripts": {
     "watch": "webpack --watch",
     "start": "webpack-dev-server --open",
-    "build": "webpack",
+    "build": "webpack && sed -i 's/use strict//g' dist/webml-polyfill.js",
     "build-wasm": "node build.js --build-wasm",
     "test": "node test-ci.js"
   },

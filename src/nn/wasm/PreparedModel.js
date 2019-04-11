@@ -7,6 +7,8 @@ import Graph from '../GraphUtils';
 var executeTimes = 0;
 var skipWarmUpRuns = 1;
 var profiling = [];
+var device = null;
+var pool = null;
 
 export default class PreparedModel {
   constructor() {
@@ -34,10 +36,14 @@ export default class PreparedModel {
     this._model = model;
     const operations = model._operations;
     this._nn_ops = await getNNOpsInstance();
+    console.log(this._nn_ops);
 
     this._preference = model._preference;
     this._supportedOps = model._supportedOps;
     this._eager = model._eager;
+    if (device === null) {
+      device = this._nn_ops.create_thread_device(8);
+    }
 
     const graph = new Graph(operations.length);
     operations.forEach((op, i) => {
@@ -590,6 +596,7 @@ export default class PreparedModel {
         let filterWidth = filter.runtimeshape.Dims(2);
         let filterHeight = filter.runtimeshape.Dims(1);
         let activation;
+        let paddingCode;
         if (inCount === 10) {
           paddingLeft = operands[inputs[i++]].value[0];
           paddingRight = operands[inputs[i++]].value[0];
@@ -606,7 +613,7 @@ export default class PreparedModel {
           }
           activation = operands[inputs[i++]].value[0];
         } else {
-          let paddingCode = operands[inputs[i++]].value[0];
+          paddingCode = operands[inputs[i++]].value[0];
           if (op === OperationCode.CONV_2D) {
             strideWidth = operands[inputs[i++]].value[0];
             strideHeight = operands[inputs[i++]].value[0];
@@ -657,6 +664,15 @@ export default class PreparedModel {
 
         let [float_activation_min, float_activation_max,
              quantized_activation_min, quantized_activation_max] = calculateActivationRange(activation, output);
+        
+        let paddingType;
+        if (paddingCode === PaddingCode.SAME) {
+          paddingType = nn_ops.PaddingType.kSame;
+        } else if (paddingCode === PaddingCode.VALID) {
+          paddingType = nn_ops.PaddingType.kValid;
+        } else {
+          paddingType = nn_ops.PaddingType.kNone;
+        }
 
         // Error check
         OPS_CHECK(input.type === filter.type);
@@ -680,6 +696,7 @@ export default class PreparedModel {
           height: paddingTop
         }
         let convParams = {
+          padding_type: paddingType, 
           padding_values: PaddingValues,
           stride_width: strideWidth,
           stride_height: strideHeight,
@@ -697,12 +714,12 @@ export default class PreparedModel {
         }
 
         if (output.type === OperandCode.TENSOR_FLOAT32) {
-          nn_ops.convFloat32(convParams, 
-                             input.runtimeshape, input.value, 
-                             filter.runtimeshape, filter.value, 
-                             bias.runtimeshape, bias.value, 
-                             output.runtimeshape, output.value,
-                             im2colShape, im2colData);
+          nn_ops.multiConvFloat32(device, convParams, 
+                                  input.runtimeshape, input.value, 
+                                  filter.runtimeshape, filter.value, 
+                                  bias.runtimeshape, bias.value, 
+                                  output.runtimeshape, output.value, 
+                                  im2colShape, im2colData);
         } else if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
           nn_ops.convUint8(convParams, 
                            input.runtimeshape, input.value, 

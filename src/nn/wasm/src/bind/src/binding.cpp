@@ -6,6 +6,8 @@
 #include "external/tensorflow/tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_float.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_uint8.h"
+#include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/multithreaded_conv.h"
+#include "external/tensorflow/tensorflow/lite/kernels/eigen_support.h"
 #include "fixedpoint/fixedpoint.h"
 #include "public/gemmlowp.h"
 
@@ -16,8 +18,50 @@
 using namespace emscripten;
 using namespace tflite;
 
+namespace Eigen {
+struct ThreadPoolDevice;
+}
+
 namespace binding_utils {
   // Operation Implements.	
+
+  class EigenThreadPoolWrapper : public Eigen::ThreadPoolInterface {
+    public:
+      // Takes ownership of 'pool'
+      explicit EigenThreadPoolWrapper(Eigen::ThreadPool* pool) : pool_(pool) {}
+      ~EigenThreadPoolWrapper() override {}
+
+      void Schedule(std::function<void()> fn) override {
+        pool_->Schedule(std::move(fn));
+      }
+      int NumThreads() const override { return pool_->NumThreads(); }
+      int CurrentThreadId() const override { return pool_->CurrentThreadId(); }
+
+    private:
+      std::unique_ptr<Eigen::ThreadPool> pool_;
+  };
+
+  struct RefCountedEigenContext {
+    std::unique_ptr<Eigen::ThreadPoolInterface> thread_pool_wrapper;
+    std::unique_ptr<Eigen::ThreadPoolDevice> device;
+    int num_references = 0;
+  };
+
+  std::unique_ptr<Eigen::ThreadPool> create_thread_pool(int threads_num) {
+    return std::unique_ptr<Eigen::ThreadPool>(new Eigen::ThreadPool(threads_num));
+  }
+
+  Eigen::ThreadPoolDevice create_thread_device(int threads_num) {
+    // RefCountedEigenContext* ptr;
+    std::unique_ptr<EigenThreadPoolWrapper> thread_pool_wrapper;
+    std::unique_ptr<Eigen::ThreadPoolDevice> device;
+    device.reset();
+    thread_pool_wrapper.reset(new EigenThreadPoolWrapper(new Eigen::ThreadPool(threads_num)));
+    device.reset(
+      new Eigen::ThreadPoolDevice(thread_pool_wrapper.get(), threads_num));
+    return *(device.get());
+  }
+
   template<typename T>
   void Maximum(const RuntimeShape& input1_shape, const T* input1_data,
                const T* input2_data, const RuntimeShape& output_shape,
@@ -127,12 +171,15 @@ namespace binding_utils {
                                  const RuntimeShape& biasShape, 
                                  const intptr_t biasData, 
                                  const RuntimeShape& outputShape, 
-                                 intptr_t outputData) {
+                                 intptr_t outputData,
+                                 gemmlowp::GemmContext gemm_context) {
+    // static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
+    // gemm_context.set_max_num_threads(8);
     optimized_ops::DepthwiseConv(op_params,
                                  inputShape, (const uint8_t*)inputData, 
                                  filterShape, (const uint8_t*)filterData, 
                                  biasShape, (const int32_t*)biasData, 
-                                 outputShape, (uint8_t*)outputData);
+                                 outputShape, (uint8_t*)outputData, &gemm_context);
   }
 
   void convFloat32Wrapper(const ConvParams& op_params, 
@@ -154,6 +201,26 @@ namespace binding_utils {
                         im2colShape, (float*)im2colData);
   }
 
+  void multiConvFloat32Wrapper(const Eigen::ThreadPoolDevice& device,
+                               const ConvParams& op_params, 
+                               const RuntimeShape& inputShape, 
+                               const intptr_t inputData, 
+                               const RuntimeShape& filterShape, 
+                               const intptr_t filterData, 
+                               const RuntimeShape& biasShape, 
+                               const intptr_t biasData, 
+                               const RuntimeShape& outputShape, 
+                               intptr_t outputData, 
+                               const RuntimeShape& im2colShape, 
+                               intptr_t im2colData) {
+    multithreaded_ops::Conv(device, op_params, 
+                            inputShape, (const float*)inputData, 
+                            filterShape, (const float*)filterData, 
+                            biasShape, (const float*)biasData, 
+                            outputShape, (float*)outputData, 
+                            im2colShape, (float*)im2colData);
+  }
+
   void convUint8Wrapper(const ConvParams& op_params, 
                         const RuntimeShape& inputShape, 
                         const intptr_t inputData, 
@@ -164,9 +231,10 @@ namespace binding_utils {
                         const RuntimeShape& outputShape, 
                         intptr_t outputData,
                         const RuntimeShape& im2colShape, 
-                        intptr_t im2colData) {
-    static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
-    // gemm_context.set_max_num_threads(0);
+                        intptr_t im2colData,
+                        gemmlowp::GemmContext gemm_context) {
+    // static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
+    // gemm_context.set_max_num_threads(8);
     optimized_ops::Conv(op_params, 
                         inputShape, (const uint8_t*)inputData, 
                         filterShape, (const uint8_t*)filterData, 
@@ -345,12 +413,35 @@ EMSCRIPTEN_BINDINGS(nn)
     .function("SetDim", &RuntimeShape::SetDim)
     ;
 
+  class_<Eigen::ThreadPool>("ThreadPool")
+    .constructor<int>()
+    // .smart_ptr<std::unique_ptr<Eigen::ThreadPool>>("unique_ptr<ThreadPool>")
+    ;
+
+  class_<Eigen::ThreadPoolDevice>("ThreadPoolDevice")
+    .constructor<Eigen::ThreadPool*, int>()
+    // .smart_ptr<std::unique_ptr<Eigen::ThreadPoolDevice>>("unique_ptr<ThreadPoolDevice>")
+    ;
+
+  class_<gemmlowp::MultiThreadGemmContextBase>("GemmContext")
+    .constructor<>()
+    // .smart_ptr<std::unique_ptr<Eigen::ThreadPoolDevice>>("unique_ptr<ThreadPoolDevice>")
+    .class_function("set_max_num_threads", &gemmlowp::MultiThreadGemmContextBase::set_max_num_threads, allow_raw_pointers())
+    ;
+
   value_object<PaddingValues>("PaddingValues")
     .field("width", &PaddingValues::width)
     .field("height", &PaddingValues::height)
     ;
 
+  enum_<PaddingType>("PaddingType")
+    .value("kNone", PaddingType::kNone)
+    .value("kSame", PaddingType::kSame)
+    .value("kValid", PaddingType::kValid)
+    ;
+
   value_object<ConvParams>("ConvParams")
+    .field("padding_type", &ConvParams::padding_type)
     .field("padding_values", &ConvParams::padding_values)
     .field("stride_width", &ConvParams::stride_width)
     .field("stride_height", &ConvParams::stride_height)
@@ -474,6 +565,7 @@ EMSCRIPTEN_BINDINGS(nn)
   function("depthwiseConvFloat32", &binding_utils::depthwiseConvFloat32Wrapper, allow_raw_pointers());
   function("depthwiseConvUint8", &binding_utils::depthwiseConvUint8Wrapper, allow_raw_pointers());
   function("convFloat32", &binding_utils::convFloat32Wrapper, allow_raw_pointers());
+  function("multiConvFloat32", &binding_utils::multiConvFloat32Wrapper, allow_raw_pointers());
   function("convUint8", &binding_utils::convUint8Wrapper, allow_raw_pointers());
   function("averagePoolFloat32", &binding_utils::averagePoolFloat32Wrapper, allow_raw_pointers());
   function("averagePoolUint8", &binding_utils::averagePoolUin8Wrapper, allow_raw_pointers());
@@ -489,6 +581,9 @@ EMSCRIPTEN_BINDINGS(nn)
   function("maximumFloat32", &binding_utils::maximumFloat32Wrapper, allow_raw_pointers());
   function("batchToSpaceNDFloat32", &binding_utils::batchToSpaceNDFloat32Wrapper, allow_raw_pointers());
   function("transposeFloat32", &binding_utils::transposeFloat32Wrapper, allow_raw_pointers());
+
+  // function("create_thread_pool", &binding_utils::create_thread_pool, allow_raw_pointers());
+  function("create_thread_device", &binding_utils::create_thread_device, allow_raw_pointers());
 
   // TODO: operation wrappers
   /*
