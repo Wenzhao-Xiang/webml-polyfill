@@ -8,7 +8,8 @@ var executeTimes = 0;
 var skipWarmUpRuns = 1;
 var profiling = [];
 var device = null;
-var pool = null;
+var gemm_context = null;
+var threadPoolHolder = null;
 
 export default class PreparedModel {
   constructor() {
@@ -34,15 +35,33 @@ export default class PreparedModel {
    */
   async prepare(model) {
     this._model = model;
+    const modelInputs = model._inputs;
     const operations = model._operations;
     this._nn_ops = await getNNOpsInstance();
-    console.log(this._nn_ops);
 
     this._preference = model._preference;
     this._supportedOps = model._supportedOps;
     this._eager = model._eager;
-    if (device === null) {
-      device = this._nn_ops.create_thread_device(8);
+
+    if (gemm_context === null && 
+      model._operands[modelInputs[0]].type === OperandCode.TENSOR_QUANT8_ASYMM) {
+        if (threadPoolHolder !== null) {
+          device.delete();
+          threadPoolHolder.delete();
+          device = null;
+          threadPoolHolder = null;
+        }
+        gemm_context = new this._nn_ops.GemmContext;
+        gemm_context.set_max_num_threads(8);
+    }
+    if (threadPoolHolder === null && 
+      model._operands[modelInputs[0]].type === OperandCode.TENSOR_FLOAT32) {
+        if (gemm_context !== null) {
+          gemm_context.delete();
+          gemm_context = null;
+        }
+        threadPoolHolder = new this._nn_ops.LazyEigenThreadPoolHolder(8);
+        device = threadPoolHolder.GetThreadPoolDevice();
     }
 
     const graph = new Graph(operations.length);
@@ -326,6 +345,24 @@ export default class PreparedModel {
       } else {
         throw new Error("Unsupported type of tensor for fused activation function.");
       }
+    }
+
+    function QuantizeMultiplier(double_multiplier) {
+      let quantized_multiplier, shift;
+      if (double_multiplier == 0.) {
+          quantized_multiplier = 0;
+          shift = 0;
+          return [quantized_multiplier, shift];
+      }
+      [q, shift] = frexp(double_multiplier);
+      quantized_multiplier = Math.round(q * -(1 << 31));
+      OPS_CHECK(quantized_multiplier <= -(1 << 31));
+      if (quantized_multiplier == -(1 << 31)) {
+        quantized_multiplier /= 2;
+        ++shift;
+      }
+      OPS_CHECK(quantized_multiplier <= nn_ops.INT32_MAX);
+      return [quantized_multiplier, shift];
     }
 
     // reference: https://android.googlesource.com/platform/frameworks/ml/+/refs/heads/master/nn/common/OperationsUtils.cpp#213
@@ -726,7 +763,7 @@ export default class PreparedModel {
                            filter.runtimeshape, filter.value, 
                            bias.runtimeshape, bias.value, 
                            output.runtimeshape, output.value,
-                           im2colShape, im2colData);
+                           im2colShape, im2colData, gemm_context);
         }
         im2colShape.delete();
         nn_ops._free(im2colData);
@@ -847,7 +884,7 @@ export default class PreparedModel {
                                     input.runtimeshape, input.value, 
                                     filter.runtimeshape, filter.value, 
                                     bias.runtimeshape, bias.value, 
-                                    output.runtimeshape, output.value);
+                                    output.runtimeshape, output.value, gemm_context);
         }
       } break;
       case OperationCode.AVERAGE_POOL_2D:
@@ -926,9 +963,15 @@ export default class PreparedModel {
                                     output.runtimeshape, output.value);
           }
         } else if (op === OperationCode.MAX_POOL_2D) {
-          nn_ops.maxPoolFloat32(poolParams, 
+          if (output.type === OperandCode.TENSOR_FLOAT32) {
+            nn_ops.maxPoolFloat32(poolParams, 
+                                  input.runtimeshape, input.value,
+                                  output.runtimeshape, output.value);
+          } else if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
+            nn_ops.maxPoolUint8(poolParams, 
                                 input.runtimeshape, input.value,
                                 output.runtimeshape, output.value);
+          }
         }
       } break;
       case OperationCode.SOFTMAX: {
@@ -1039,11 +1082,28 @@ export default class PreparedModel {
         // init concatenationParams
         let concatenationParams = {
           axis: axis,
-          inputs_count: numInputTensors
+          inputs_count: numInputTensors,
+          output_scale: output.scale,
+          output_zeropoint: output.zeroPoint || 0
         }
 
-        nn_ops.concatenationFloat32(concatenationParams, inputShapes, inputValues, 
+        if (output.type === OperandCode.TENSOR_FLOAT32) {
+          nn_ops.concatenationFloat32(concatenationParams, inputShapes, inputValues, 
+                                      output.runtimeshape, output.value);
+        } else if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
+          let inputScale = new nn_ops.floatVector;
+          let inputZeroPint = new nn_ops.int32Vector;
+          for (let i = 0; i < numInputTensors; ++i) {
+            let input = operands[inputs[i]];
+            inputScale.push_back(input.scale);
+            inputZeroPint.push_back(input.zeroPoint);
+          }
+          nn_ops.concatenationUint8(concatenationParams, inputShapes, inputValues, 
+                                    inputScale, inputZeroPint,
                                     output.runtimeshape, output.value);
+          inputScale.delete();
+          inputZeroPint.delete();
+        }
         inputShapes.delete();
         inputValues.delete();
       } break;
@@ -1055,6 +1115,13 @@ export default class PreparedModel {
         let activation = operands[inputs[3]].value[0];
         let output = operands[outputs[0]];
 
+        let output_multiplier = 0, output_shift = 0;
+        if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
+          let real_multiplier = GetQuantizedConvolutionMultipler(input.scale, weights.scale, 
+                                                                bias.scale, output.scale);
+          [output_multiplier, output_shift] = QuantizeMultiplier(real_multiplier);
+        }
+
         let [float_activation_min, float_activation_max,
              quantized_activation_min, quantized_activation_max] = calculateActivationRange(activation, output);
 
@@ -1064,14 +1131,29 @@ export default class PreparedModel {
         // init fullyConnectedParams
         let fullyConnectedParams = {
           float_activation_min: float_activation_min,
-          float_activation_max: float_activation_max
+          float_activation_max: float_activation_max,
+          input_offset: -input.zeroPoint || 0,
+          weights_offset: -weights.zeroPoint || 0,
+          output_offset: output.zeroPoint || 0,
+          output_multiplier: output_multiplier,
+          output_shift: output_shift,
+          quantized_activation_min: quantized_activation_min,
+          quantized_activation_max: quantized_activation_max
         }
 
-        nn_ops.fullyConnectedFloat32(fullyConnectedParams, 
+        if (output.type === OperandCode.TENSOR_FLOAT32) {
+          nn_ops.fullyConnectedFloat32(fullyConnectedParams, 
+                                       input.runtimeshape, input.value, 
+                                       weights.runtimeshape, weights.value, 
+                                       bias.runtimeshape, bias.value, 
+                                       output.runtimeshape, output.value);
+        } else if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
+          nn_ops.fullyConnectedUint8(fullyConnectedParams, 
                                      input.runtimeshape, input.value, 
                                      weights.runtimeshape, weights.value, 
                                      bias.runtimeshape, bias.value, 
-                                     output.runtimeshape, output.value);
+                                     output.runtimeshape, output.value, gemm_context);
+        }
       } break;
       case OperationCode.RESIZE_BILINEAR: {
         let inCount = inputs.length;

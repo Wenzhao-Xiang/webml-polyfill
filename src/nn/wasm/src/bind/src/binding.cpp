@@ -18,49 +18,75 @@
 using namespace emscripten;
 using namespace tflite;
 
-namespace Eigen {
-struct ThreadPoolDevice;
-}
-
 namespace binding_utils {
   // Operation Implements.	
 
+  // wrapper class
   class EigenThreadPoolWrapper : public Eigen::ThreadPoolInterface {
     public:
       // Takes ownership of 'pool'
-      explicit EigenThreadPoolWrapper(Eigen::ThreadPool* pool) : pool_(pool) {}
+      explicit EigenThreadPoolWrapper(int num_threads) {
+        // Avoid creating any threads for the single-threaded case.
+        if (num_threads > 1) {
+          pool_.reset(new Eigen::ThreadPool(num_threads));
+        }
+      }
       ~EigenThreadPoolWrapper() override {}
 
       void Schedule(std::function<void()> fn) override {
-        pool_->Schedule(std::move(fn));
+        if (pool_) {
+          pool_->Schedule(std::move(fn));
+        } else {
+          fn();
+        }
       }
-      int NumThreads() const override { return pool_->NumThreads(); }
-      int CurrentThreadId() const override { return pool_->CurrentThreadId(); }
+      int NumThreads() const override { return pool_ ? pool_->NumThreads() : 1; }
+      int CurrentThreadId() const override {
+        return pool_ ? pool_->CurrentThreadId() : 0;
+      }
 
     private:
+      // May be null if num_threads <= 1.
       std::unique_ptr<Eigen::ThreadPool> pool_;
   };
 
-  struct RefCountedEigenContext {
-    std::unique_ptr<Eigen::ThreadPoolInterface> thread_pool_wrapper;
-    std::unique_ptr<Eigen::ThreadPoolDevice> device;
-    int num_references = 0;
-  };
+  const int kDefaultNumThreadpoolThreads = 4;
 
-  std::unique_ptr<Eigen::ThreadPool> create_thread_pool(int threads_num) {
-    return std::unique_ptr<Eigen::ThreadPool>(new Eigen::ThreadPool(threads_num));
-  }
+  class LazyEigenThreadPoolHolder {
+    public:
+      explicit LazyEigenThreadPoolHolder(int num_threads) {
+        SetNumThreads(num_threads);
+      }
 
-  Eigen::ThreadPoolDevice create_thread_device(int threads_num) {
-    // RefCountedEigenContext* ptr;
-    std::unique_ptr<EigenThreadPoolWrapper> thread_pool_wrapper;
-    std::unique_ptr<Eigen::ThreadPoolDevice> device;
-    device.reset();
-    thread_pool_wrapper.reset(new EigenThreadPoolWrapper(new Eigen::ThreadPool(threads_num)));
-    device.reset(
-      new Eigen::ThreadPoolDevice(thread_pool_wrapper.get(), threads_num));
-    return *(device.get());
-  }
+      // Gets the ThreadPoolDevice, creating if necessary.
+      const Eigen::ThreadPoolDevice* GetThreadPoolDevice() {
+        if (!device_) {
+          thread_pool_wrapper_.reset(
+              new EigenThreadPoolWrapper(target_num_threads_));
+          device_.reset(new Eigen::ThreadPoolDevice(thread_pool_wrapper_.get(),
+                                                    target_num_threads_));
+        }
+        return device_.get();
+      }
+
+      // Updates the thread count, invalidating the ThreadPoolDevice if necessary.
+      void SetNumThreads(int num_threads) {
+        const int target_num_threads =
+            num_threads != -1 ? num_threads : kDefaultNumThreadpoolThreads;
+        if (target_num_threads_ != target_num_threads) {
+          target_num_threads_ = target_num_threads;
+          // As the device references the thread pool wrapper, destroy it first.
+          device_.reset();
+          thread_pool_wrapper_.reset();
+        }
+      }
+
+    private:
+      int target_num_threads_ = kDefaultNumThreadpoolThreads;
+      // Both device_ and thread_pool_wrapper_ are lazily created.
+      std::unique_ptr<Eigen::ThreadPoolDevice> device_;
+      std::unique_ptr<Eigen::ThreadPoolInterface> thread_pool_wrapper_;
+};
 
   template<typename T>
   void Maximum(const RuntimeShape& input1_shape, const T* input1_data,
@@ -172,14 +198,12 @@ namespace binding_utils {
                                  const intptr_t biasData, 
                                  const RuntimeShape& outputShape, 
                                  intptr_t outputData,
-                                 gemmlowp::GemmContext gemm_context) {
-    // static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
-    // gemm_context.set_max_num_threads(8);
+                                 gemmlowp::GemmContext* gemm_context) {
     optimized_ops::DepthwiseConv(op_params,
                                  inputShape, (const uint8_t*)inputData, 
                                  filterShape, (const uint8_t*)filterData, 
                                  biasShape, (const int32_t*)biasData, 
-                                 outputShape, (uint8_t*)outputData, &gemm_context);
+                                 outputShape, (uint8_t*)outputData, gemm_context);
   }
 
   void convFloat32Wrapper(const ConvParams& op_params, 
@@ -201,7 +225,7 @@ namespace binding_utils {
                         im2colShape, (float*)im2colData);
   }
 
-  void multiConvFloat32Wrapper(const Eigen::ThreadPoolDevice& device,
+  void multiConvFloat32Wrapper(const Eigen::ThreadPoolDevice* device,
                                const ConvParams& op_params, 
                                const RuntimeShape& inputShape, 
                                const intptr_t inputData, 
@@ -213,7 +237,7 @@ namespace binding_utils {
                                intptr_t outputData, 
                                const RuntimeShape& im2colShape, 
                                intptr_t im2colData) {
-    multithreaded_ops::Conv(device, op_params, 
+    multithreaded_ops::Conv(*device, op_params, 
                             inputShape, (const float*)inputData, 
                             filterShape, (const float*)filterData, 
                             biasShape, (const float*)biasData, 
@@ -232,15 +256,13 @@ namespace binding_utils {
                         intptr_t outputData,
                         const RuntimeShape& im2colShape, 
                         intptr_t im2colData,
-                        gemmlowp::GemmContext gemm_context) {
-    // static gemmlowp::GemmContext gemm_context; // the default num_threads is 1
-    // gemm_context.set_max_num_threads(8);
+                        gemmlowp::GemmContext* gemm_context) {
     optimized_ops::Conv(op_params, 
                         inputShape, (const uint8_t*)inputData, 
                         filterShape, (const uint8_t*)filterData, 
                         biasShape, (const int32_t*)biasData, 
                         outputShape, (uint8_t*)outputData, 
-                        im2colShape, (uint8_t*)im2colData, &gemm_context);
+                        im2colShape, (uint8_t*)im2colData, gemm_context);
   }
 
   void averagePoolFloat32Wrapper(const PoolParams op_params,
@@ -271,6 +293,16 @@ namespace binding_utils {
     optimized_ops::MaxPool(op_params,
                            inputShape, (const float*)inputData,
                            outputShape, (float*)outputData);
+  }
+
+  void maxPoolUint8Wrapper(const PoolParams op_params,
+                           const RuntimeShape& inputShape, 
+                           const intptr_t inputData, 
+                           const RuntimeShape& outputShape, 
+                           intptr_t outputData) {
+    optimized_ops::MaxPool(op_params,
+                           inputShape, (const uint8_t*)inputData,
+                           outputShape, (uint8_t*)outputData);
   }
 
   void softmaxFloat32Wrapper(const SoftmaxParams op_params,
@@ -320,6 +352,21 @@ namespace binding_utils {
                                         outputShape, (float*)outputData);
   }
 
+  void concatenationUint8Wrapper(ConcatenationParams op_params, 
+                                 const std::vector<RuntimeShape*> inputShapes, 
+                                 const std::vector<intptr_t>& inputDataPtrs,
+                                 const std::vector<float>& inputScalePtrs,
+                                 const std::vector<int32_t>& inputZeroPointPtrs,
+                                 const RuntimeShape& outputShape, 
+                                 intptr_t outputData) {
+    op_params.input_scale = (inputScalePtrs).data();
+    op_params.input_zeropoint = (inputZeroPointPtrs).data();
+    optimized_ops::ConcatenationWithScaling(op_params,
+                                          inputShapes.data(),
+                                          ((const std::vector<const uint8_t*>&)inputDataPtrs).data(), 
+                                          outputShape, (uint8_t*)outputData);
+  }
+
   void fullyConnectedFloat32Wrapper(const FullyConnectedParams op_params,
                                     const RuntimeShape& inputShape, 
                                     const intptr_t inputData, 
@@ -334,6 +381,23 @@ namespace binding_utils {
                                   weightsShape, (const float*)weightsData, 
                                   biasShape, (const float*)biasData,
                                   outputShape, (float*)outputData);
+  }
+
+  void fullyConnectedUint8Wrapper(const FullyConnectedParams op_params,
+                                  const RuntimeShape& inputShape, 
+                                  const intptr_t inputData, 
+                                  const RuntimeShape& weightsShape, 
+                                  const intptr_t weightsData, 
+                                  const RuntimeShape& biasShape, 
+                                  const intptr_t biasData, 
+                                  const RuntimeShape& outputShape, 
+                                  intptr_t outputData,
+                                  gemmlowp::GemmContext* gemm_context) {
+    optimized_ops::FullyConnected(op_params, 
+                                  inputShape, (const uint8_t*)inputData, 
+                                  weightsShape, (const uint8_t*)weightsData, 
+                                  biasShape, (const int32_t*)biasData,
+                                  outputShape, (uint8_t*)outputData, gemm_context);
   }
 
   void resizeBilinearFloat32Wrapper(const ResizeBilinearParams op_params,
@@ -415,18 +479,32 @@ EMSCRIPTEN_BINDINGS(nn)
 
   class_<Eigen::ThreadPool>("ThreadPool")
     .constructor<int>()
-    // .smart_ptr<std::unique_ptr<Eigen::ThreadPool>>("unique_ptr<ThreadPool>")
     ;
 
   class_<Eigen::ThreadPoolDevice>("ThreadPoolDevice")
     .constructor<Eigen::ThreadPool*, int>()
-    // .smart_ptr<std::unique_ptr<Eigen::ThreadPoolDevice>>("unique_ptr<ThreadPoolDevice>")
     ;
 
-  class_<gemmlowp::MultiThreadGemmContextBase>("GemmContext")
+  class_<gemmlowp::SingleThreadGemmContext>("SingleThreadGemmContext")
     .constructor<>()
-    // .smart_ptr<std::unique_ptr<Eigen::ThreadPoolDevice>>("unique_ptr<ThreadPoolDevice>")
-    .class_function("set_max_num_threads", &gemmlowp::MultiThreadGemmContextBase::set_max_num_threads, allow_raw_pointers())
+    ;
+
+  class_<gemmlowp::MultiThreadGemmContextBase, base<gemmlowp::SingleThreadGemmContext>>("MultiThreadGemmContextBase")
+    .constructor<>()
+    .function("set_max_num_threads", &gemmlowp::MultiThreadGemmContextBase::set_max_num_threads)
+    ;
+
+  class_<gemmlowp::MultiThreadGemmContext, base<gemmlowp::MultiThreadGemmContextBase>>("MultiThreadGemmContext")
+    .constructor<>()
+    ;
+
+  class_<gemmlowp::GemmContext, base<gemmlowp::MultiThreadGemmContext>>("GemmContext")
+    .constructor<>()
+    ;
+
+  class_<binding_utils::LazyEigenThreadPoolHolder>("LazyEigenThreadPoolHolder")
+    .constructor<int>()
+    .function("GetThreadPoolDevice", &binding_utils::LazyEigenThreadPoolHolder::GetThreadPoolDevice, allow_raw_pointer<ret_val>())
     ;
 
   value_object<PaddingValues>("PaddingValues")
@@ -511,11 +589,23 @@ EMSCRIPTEN_BINDINGS(nn)
   value_object<ConcatenationParams>("ConcatenationParams")
     .field("axis", &ConcatenationParams::axis)
     .field("inputs_count", &ConcatenationParams::inputs_count)
+    .field("output_scale", &ConcatenationParams::output_scale)
+    .field("output_zeropoint", &ConcatenationParams::output_zeropoint)
     ;
 
   value_object<FullyConnectedParams>("FullyConnectedParams")
+    // float activation params.
     .field("float_activation_min", &FullyConnectedParams::float_activation_min)
     .field("float_activation_max", &FullyConnectedParams::float_activation_max)
+    // uint8 inference params.
+    .field("input_offset", &FullyConnectedParams::input_offset)
+    .field("weights_offset", &FullyConnectedParams::weights_offset)
+    .field("output_offset", &FullyConnectedParams::output_offset)
+    .field("output_multiplier", &FullyConnectedParams::output_multiplier)
+    .field("output_shift", &FullyConnectedParams::output_shift)
+    // uint8, etc, activation params.
+    .field("quantized_activation_min", &FullyConnectedParams::quantized_activation_min)
+    .field("quantized_activation_max", &FullyConnectedParams::quantized_activation_max)
     ;
 
   value_object<ArithmeticParams>("ArithmeticParams")
@@ -553,6 +643,8 @@ EMSCRIPTEN_BINDINGS(nn)
 
   register_vector<RuntimeShape*>("VectorShape");
   register_vector<intptr_t>("VectorPtr");
+  register_vector<float>("floatVector");
+  register_vector<int32_t>("int32Vector");
 
 
   // Operations.
@@ -574,16 +666,16 @@ EMSCRIPTEN_BINDINGS(nn)
   function("reshapeFloat32", &binding_utils::reshapeFloat32Wrapper, allow_raw_pointers());
   function("reshapeUint8", &binding_utils::reshapeUint8Wrapper, allow_raw_pointers());
   function("maxPoolFloat32", &binding_utils::maxPoolFloat32Wrapper, allow_raw_pointers());
+  function("maxPoolUint8", &binding_utils::maxPoolUint8Wrapper, allow_raw_pointers());
   function("concatenationFloat32", &binding_utils::concatenationFloat32Wrapper, allow_raw_pointers());
+  function("concatenationUint8", &binding_utils::concatenationUint8Wrapper, allow_raw_pointers());
   function("fullyConnectedFloat32", &binding_utils::fullyConnectedFloat32Wrapper, allow_raw_pointers());
+  function("fullyConnectedUint8", &binding_utils::fullyConnectedUint8Wrapper, allow_raw_pointers());
   function("resizeBilinearFloat32", &binding_utils::resizeBilinearFloat32Wrapper, allow_raw_pointers());
   function("tanhFloat32", &binding_utils::tanhFloat32Wrapper, allow_raw_pointers());
   function("maximumFloat32", &binding_utils::maximumFloat32Wrapper, allow_raw_pointers());
   function("batchToSpaceNDFloat32", &binding_utils::batchToSpaceNDFloat32Wrapper, allow_raw_pointers());
   function("transposeFloat32", &binding_utils::transposeFloat32Wrapper, allow_raw_pointers());
-
-  // function("create_thread_pool", &binding_utils::create_thread_pool, allow_raw_pointers());
-  function("create_thread_device", &binding_utils::create_thread_device, allow_raw_pointers());
 
   // TODO: operation wrappers
   /*
