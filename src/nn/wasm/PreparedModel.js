@@ -751,12 +751,21 @@ export default class PreparedModel {
         }
 
         if (output.type === OperandCode.TENSOR_FLOAT32) {
-          nn_ops.multiConvFloat32(device, convParams, 
-                                  input.runtimeshape, input.value, 
-                                  filter.runtimeshape, filter.value, 
-                                  bias.runtimeshape, bias.value, 
-                                  output.runtimeshape, output.value, 
-                                  im2colShape, im2colData);
+          if (op === OperationCode.CONV_2D) {
+            nn_ops.multiConvFloat32(deice, convParams, 
+                                    input.runtimeshape, input.value, 
+                                    filter.runtimeshape, filter.value, 
+                                    bias.runtimeshape, bias.value, 
+                                    output.runtimeshape, output.value, 
+                                    im2colShape, im2colData);
+          } else if (op === OperationCode.ATROUS_CONV_2D) {
+            nn_ops.convFloat32(convParams, 
+                               input.runtimeshape, input.value, 
+                               filter.runtimeshape, filter.value, 
+                               bias.runtimeshape, bias.value, 
+                               output.runtimeshape, output.value, 
+                               im2colShape, im2colData);
+          }
         } else if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
           nn_ops.convUint8(convParams, 
                            input.runtimeshape, input.value, 
@@ -1083,7 +1092,7 @@ export default class PreparedModel {
         let concatenationParams = {
           axis: axis,
           inputs_count: numInputTensors,
-          output_scale: output.scale,
+          output_scale: output.scale || 0,
           output_zeropoint: output.zeroPoint || 0
         }
 
