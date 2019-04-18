@@ -1,13 +1,13 @@
 #include <emscripten/bind.h>
 #include <emscripten/val.h>
 
+#include "external/tensorflow/tensorflow/lite/kernels/eigen_support.h"
+#include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/multithreaded_conv.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/types.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_float.h"
 #include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/depthwiseconv_uint8.h"
-#include "external/tensorflow/tensorflow/lite/kernels/internal/optimized/multithreaded_conv.h"
-#include "external/tensorflow/tensorflow/lite/kernels/eigen_support.h"
 #include "fixedpoint/fixedpoint.h"
 #include "public/gemmlowp.h"
 

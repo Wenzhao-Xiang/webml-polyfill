@@ -24,7 +24,7 @@ const WASM_SRC = path.join(ROOT, 'src/nn/wasm/src');
 const WASM_SRC_EXTERNAL = path.join(WASM_SRC, 'external');
 const WASM_BUILD = path.join(WASM_SRC, 'build');
 const WASM_TENSORFLOW = path.join(WASM_SRC, 'external/tensorflow');
-const TENSORFLOW_DOWNLOADS = path.join(WASM_TENSORFLOW, 'tensorflow/contrib/makefile/downloads');
+const TENSORFLOW_DOWNLOADS = path.join(WASM_TENSORFLOW, 'tensorflow/lite/tools/make/downloads');
 const TENSORFLOW_EIGEN = path.join(TENSORFLOW_DOWNLOADS, 'eigen');
 const TENSORFLOW_GEMMLOWP = path.join(TENSORFLOW_DOWNLOADS, 'gemmlowp');
 const BUILD_NN_OPS = path.join(WASM_BUILD, 'nn_ops.js');
@@ -57,7 +57,7 @@ logger.info('Build.SubModules', '(2/3) Fetching submodules... DONE');
 
 logger.info('Download tensorflow dependencies', '(3/3) Downloading... ');
 if (!fs.existsSync(TENSORFLOW_EIGEN) || !fs.existsSync(TENSORFLOW_GEMMLOWP)) {
-  const download = spawnSync('tensorflow/contrib/makefile/download_dependencies.sh', {shell: true, stdio: 'inherit', cwd: WASM_TENSORFLOW});
+  const download = spawnSync('tensorflow/lite/tools/make/download_dependencies.sh', {shell: true, stdio: 'inherit', cwd: WASM_TENSORFLOW});
   if (download.status !== 0) {
     if (download.error) {
       console.error(download.error);

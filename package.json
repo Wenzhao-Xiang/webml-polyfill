@@ -11,6 +11,7 @@
     "start": "webpack-dev-server --open",
     "build": "webpack && sed -i 's/use strict//g' dist/webml-polyfill.js",
     "build-wasm": "node build.js --build-wasm",
+    "build-all": "node build.js --build-wasm && webpack && sed -i 's/use strict//g' dist/webml-polyfill.js && http-server",
     "test": "node test-ci.js"
   },
   "repository": {
