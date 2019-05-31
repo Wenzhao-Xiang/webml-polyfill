@@ -19,7 +19,7 @@ using namespace emscripten;
 using namespace tflite;
 
 namespace binding_utils {
-  // Operation Implements.	
+  // Operation Implements. 
 
   // wrapper class
   class EigenThreadPoolWrapper : public Eigen::ThreadPoolInterface {
@@ -51,6 +51,7 @@ namespace binding_utils {
   };
 
   const int kDefaultNumThreadpoolThreads = 4;
+  std::mutex executionMutex;
 
   class LazyEigenThreadPoolHolder {
     public:
@@ -86,7 +87,108 @@ namespace binding_utils {
       // Both device_ and thread_pool_wrapper_ are lazily created.
       std::unique_ptr<Eigen::ThreadPoolDevice> device_;
       std::unique_ptr<Eigen::ThreadPoolInterface> thread_pool_wrapper_;
-};
+  };
+
+  static LazyEigenThreadPoolHolder holder(4);
+  static gemmlowp::GemmContext gemm_context;
+  // ThreadPool pool(4);
+
+
+  void gemm_set_max_num_threads(int num_threads) {
+    gemm_context.set_max_num_threads(num_threads);
+  }
+
+  void eigen_set_num_threads(int num_threads) {
+    holder.SetNumThreads(num_threads);
+  }
+
+  struct quantizeMultiplier {
+    int32_t quantized_multiplier;
+    int shift;
+  };
+
+  quantizeMultiplier QuantizeMultiplier(double double_multiplier, int32_t quantized_multiplier, int shift) {
+    quantizeMultiplier output;
+    if (double_multiplier == 0.) {
+        quantized_multiplier = 0;
+        shift = 0;
+        output.quantized_multiplier = quantized_multiplier;
+        output.shift = shift;
+        return output;
+    }
+    const double q = std::frexp(double_multiplier, &shift);
+    auto q_fixed = static_cast<int64_t>(std::round(q * (1ll << 31)));
+    // NN_RET_CHECK(q_fixed <= (1ll << 31));
+    if (q_fixed == (1ll << 31)) {
+        q_fixed /= 2;
+        ++shift;
+    }
+    // NN_RET_CHECK_LE(q_fixed, std::numeric_limits<int32_t>::max());
+    quantized_multiplier = static_cast<int32_t>(q_fixed);
+    output.quantized_multiplier = quantized_multiplier;
+    output.shift = shift;
+    return output;
+  }
+
+  quantizeMultiplier QuantizeMultiplierSmallerThanOne(double double_multiplier,
+                                        int32_t quantized_multiplier,
+                                        int32_t right_shift) {
+    // NN_OPS_CHECK(double_multiplier >= 0.);
+    // NN_OPS_CHECK(double_multiplier < 1.);
+    quantizeMultiplier output;
+    if (double_multiplier == 0.) {
+        quantized_multiplier = 0;
+        right_shift = 0;
+        output.quantized_multiplier = quantized_multiplier;
+        output.shift = right_shift;
+        return output;
+    }
+    // NN_OPS_CHECK(double_multiplier > 0.);
+    const double q = std::frexp(double_multiplier, &right_shift);
+    right_shift *= -1;
+    int64_t q_fixed = static_cast<int64_t>(std::round(q * (1LL << 31)));
+    // NN_OPS_CHECK(q_fixed <= (1LL << 31));
+    if (q_fixed == (1LL << 31)) {
+        q_fixed /= 2;
+        --right_shift;
+    }
+    // NN_OPS_CHECK(*right_shift >= 0);
+    // NN_OPS_CHECK(q_fixed <= std::numeric_limits<int32_t>::max());
+    quantized_multiplier = static_cast<int32_t>(q_fixed);
+    output.quantized_multiplier = quantized_multiplier;
+    output.shift = right_shift;
+    return output;
+  }
+
+  quantizeMultiplier QuantizeMultiplierGreaterThanOne(double double_multiplier,
+                                        int32_t quantized_multiplier,
+                                        int left_shift) {
+    // NN_OPS_CHECK(double_multiplier > 1.);
+    quantizeMultiplier output;
+    const double q = std::frexp(double_multiplier, &left_shift);
+    int64_t q_fixed = static_cast<int64_t>(std::round(q * (1LL << 31)));
+    // NN_OPS_CHECK(q_fixed <= (1LL << 31));
+    if (q_fixed == (1LL << 31)) {
+        q_fixed /= 2;
+        ++left_shift;
+    }
+    // NN_OPS_CHECK(*left_shift >= 0);
+    // NN_OPS_CHECK(q_fixed <= std::numeric_limits<int32_t>::max());
+    quantized_multiplier = static_cast<int32_t>(q_fixed);
+    output.quantized_multiplier = quantized_multiplier;
+    output.shift = left_shift;
+    return output;
+  }
+
+  int32_t CalculateInputRadius(int input_integer_bits, int input_left_shift) {
+    const double max_input_rescaled = 1.0 * ((1 << input_integer_bits) - 1) *
+                                      (1LL << (31 - input_integer_bits)) /
+                                      (1LL << input_left_shift);
+    // Tighten bound using floor.  Suppose that we could use the exact value.
+    // After scaling the difference, the result would be at the maximum.  Thus we
+    // must ensure that our value has lower magnitude.
+    return static_cast<int32_t>(std::floor(max_input_rescaled));
+  }
 
   template<typename T>
   void Maximum(const RuntimeShape& input1_shape, const T* input1_data,
@@ -197,13 +299,12 @@ namespace binding_utils {
                                  const RuntimeShape& biasShape, 
                                  const intptr_t biasData, 
                                  const RuntimeShape& outputShape, 
-                                 intptr_t outputData,
-                                 gemmlowp::GemmContext* gemm_context) {
+                                 intptr_t outputData) {
     optimized_ops::DepthwiseConv(op_params,
                                  inputShape, (const uint8_t*)inputData, 
                                  filterShape, (const uint8_t*)filterData, 
                                  biasShape, (const int32_t*)biasData, 
-                                 outputShape, (uint8_t*)outputData, gemm_context);
+                                 outputShape, (uint8_t*)outputData, &gemm_context);
   }
 
   void convFloat32Wrapper(const ConvParams& op_params, 
@@ -217,6 +318,7 @@ namespace binding_utils {
                           intptr_t outputData,
                           const RuntimeShape& im2colShape, 
                           intptr_t im2colData) {
+    std::unique_lock<std::mutex> lock(executionMutex);
     optimized_ops::Conv(op_params, 
                         inputShape, (const float*)inputData, 
                         filterShape, (const float*)filterData, 
@@ -225,8 +327,7 @@ namespace binding_utils {
                         im2colShape, (float*)im2colData);
   }
 
-  void multiConvFloat32Wrapper(const Eigen::ThreadPoolDevice* device,
-                               const ConvParams& op_params, 
+  void multiConvFloat32Wrapper(const ConvParams& op_params, 
                                const RuntimeShape& inputShape, 
                                const intptr_t inputData, 
                                const RuntimeShape& filterShape, 
@@ -237,6 +338,8 @@ namespace binding_utils {
                                intptr_t outputData, 
                                const RuntimeShape& im2colShape, 
                                intptr_t im2colData) {
+    std::unique_lock<std::mutex> lock(executionMutex);
+    const Eigen::ThreadPoolDevice* device = holder.GetThreadPoolDevice();
     multithreaded_ops::Conv(*device, op_params, 
                             inputShape, (const float*)inputData, 
                             filterShape, (const float*)filterData, 
@@ -255,14 +358,14 @@ namespace binding_utils {
                         const RuntimeShape& outputShape, 
                         intptr_t outputData,
                         const RuntimeShape& im2colShape, 
-                        intptr_t im2colData,
-                        gemmlowp::GemmContext* gemm_context) {
+                        intptr_t im2colData) {
+    std::unique_lock<std::mutex> lock(executionMutex);
     optimized_ops::Conv(op_params, 
                         inputShape, (const uint8_t*)inputData, 
                         filterShape, (const uint8_t*)filterData, 
                         biasShape, (const int32_t*)biasData, 
                         outputShape, (uint8_t*)outputData, 
-                        im2colShape, (uint8_t*)im2colData, gemm_context);
+                        im2colShape, (uint8_t*)im2colData, &gemm_context);
   }
 
   void averagePoolFloat32Wrapper(const PoolParams op_params,
@@ -391,13 +494,12 @@ namespace binding_utils {
                                   const RuntimeShape& biasShape, 
                                   const intptr_t biasData, 
                                   const RuntimeShape& outputShape, 
-                                  intptr_t outputData,
-                                  gemmlowp::GemmContext* gemm_context) {
+                                  intptr_t outputData) {
     optimized_ops::FullyConnected(op_params, 
                                   inputShape, (const uint8_t*)inputData, 
                                   weightsShape, (const uint8_t*)weightsData, 
                                   biasShape, (const int32_t*)biasData,
-                                  outputShape, (uint8_t*)outputData, gemm_context);
+                                  outputShape, (uint8_t*)outputData, &gemm_context);
   }
 
   void resizeBilinearFloat32Wrapper(const ResizeBilinearParams op_params,
@@ -475,36 +577,6 @@ EMSCRIPTEN_BINDINGS(nn)
     .function("DimensionsCount", &RuntimeShape::DimensionsCount)
     .function("Dims", &RuntimeShape::Dims)
     .function("SetDim", &RuntimeShape::SetDim)
-    ;
-
-  class_<Eigen::ThreadPool>("ThreadPool")
-    .constructor<int>()
-    ;
-
-  class_<Eigen::ThreadPoolDevice>("ThreadPoolDevice")
-    .constructor<Eigen::ThreadPool*, int>()
-    ;
-
-  class_<gemmlowp::SingleThreadGemmContext>("SingleThreadGemmContext")
-    .constructor<>()
-    ;
-
-  class_<gemmlowp::MultiThreadGemmContextBase, base<gemmlowp::SingleThreadGemmContext>>("MultiThreadGemmContextBase")
-    .constructor<>()
-    .function("set_max_num_threads", &gemmlowp::MultiThreadGemmContextBase::set_max_num_threads)
-    ;
-
-  class_<gemmlowp::MultiThreadGemmContext, base<gemmlowp::MultiThreadGemmContextBase>>("MultiThreadGemmContext")
-    .constructor<>()
-    ;
-
-  class_<gemmlowp::GemmContext, base<gemmlowp::MultiThreadGemmContext>>("GemmContext")
-    .constructor<>()
-    ;
-
-  class_<binding_utils::LazyEigenThreadPoolHolder>("LazyEigenThreadPoolHolder")
-    .constructor<int>()
-    .function("GetThreadPoolDevice", &binding_utils::LazyEigenThreadPoolHolder::GetThreadPoolDevice, allow_raw_pointer<ret_val>())
     ;
 
   value_object<PaddingValues>("PaddingValues")
@@ -633,6 +705,11 @@ EMSCRIPTEN_BINDINGS(nn)
     .field("perm", &TransposeParams::perm)
     .field("perm_count", &TransposeParams::perm_count)
     ;
+
+  value_object<binding_utils::quantizeMultiplier>("quantizeMultiplier")
+    .field("quantized_multiplier", &binding_utils::quantizeMultiplier::quantized_multiplier)
+    .field("shift", &binding_utils::quantizeMultiplier::shift)
+    ;
   
   value_array<std::array<int32_t, 4>>("array_int32_4")
     .element(emscripten::index<0>())
@@ -676,6 +753,14 @@ EMSCRIPTEN_BINDINGS(nn)
   function("maximumFloat32", &binding_utils::maximumFloat32Wrapper, allow_raw_pointers());
   function("batchToSpaceNDFloat32", &binding_utils::batchToSpaceNDFloat32Wrapper, allow_raw_pointers());
   function("transposeFloat32", &binding_utils::transposeFloat32Wrapper, allow_raw_pointers());
+
+  // help functions
+  function("gemm_set_max_num_threads", &binding_utils::gemm_set_max_num_threads);
+  function("eigen_set_num_threads", &binding_utils::eigen_set_num_threads);
+  function("QuantizeMultiplier", &binding_utils::QuantizeMultiplier, allow_raw_pointers());
+  function("QuantizeMultiplierGreaterThanOne", &binding_utils::QuantizeMultiplierGreaterThanOne, allow_raw_pointers());
+  function("QuantizeMultiplierSmallerThanOne", &binding_utils::QuantizeMultiplierSmallerThanOne, allow_raw_pointers());
+  function("CalculateInputRadius", &binding_utils::CalculateInputRadius, allow_raw_pointers());
 
   // TODO: operation wrappers
   /*

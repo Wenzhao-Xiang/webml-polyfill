@@ -7,9 +7,6 @@ import Graph from '../GraphUtils';
 var executeTimes = 0;
 var skipWarmUpRuns = 1;
 var profiling = [];
-var device = null;
-var gemm_context = null;
-var threadPoolHolder = null;
 
 export default class PreparedModel {
   constructor() {
@@ -43,25 +40,11 @@ export default class PreparedModel {
     this._supportedOps = model._supportedOps;
     this._eager = model._eager;
 
-    if (gemm_context === null && 
-      model._operands[modelInputs[0]].type === OperandCode.TENSOR_QUANT8_ASYMM) {
-        if (threadPoolHolder !== null) {
-          device.delete();
-          threadPoolHolder.delete();
-          device = null;
-          threadPoolHolder = null;
-        }
-        gemm_context = new this._nn_ops.GemmContext;
-        gemm_context.set_max_num_threads(8);
+    if (model._operands[modelInputs[0]].type === OperandCode.TENSOR_QUANT8_ASYMM) {
+      this._nn_ops.gemm_set_max_num_threads(4);
     }
-    if (threadPoolHolder === null && 
-      model._operands[modelInputs[0]].type === OperandCode.TENSOR_FLOAT32) {
-        if (gemm_context !== null) {
-          gemm_context.delete();
-          gemm_context = null;
-        }
-        threadPoolHolder = new this._nn_ops.LazyEigenThreadPoolHolder(8);
-        device = threadPoolHolder.GetThreadPoolDevice();
+    if (model._operands[modelInputs[0]].type === OperandCode.TENSOR_FLOAT32) {
+      this._nn_ops.eigen_set_num_threads(1);
     }
 
     const graph = new Graph(operations.length);
@@ -617,6 +600,7 @@ export default class PreparedModel {
       } break;
       case OperationCode.CONV_2D:
       case OperationCode.ATROUS_CONV_2D: {
+        // let start = performance.now();
         let inCount = inputs.length;
         if (inCount !== 7 && inCount !== 10) {
           throw new Error('Invalid parameters number of CONV_2D');
@@ -677,11 +661,16 @@ export default class PreparedModel {
         let inDepth = input.runtimeshape.Dims(3);
 
         let output_multiplier = 0, output_shift = 0;
+        let quantizeMultiplier = {
+          quantized_multiplier: 0,
+          shift: 0
+        };
         let typedArray = Float32Array;
         if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
           let real_multiplier = GetQuantizedConvolutionMultipler(input.scale, filter.scale, 
                                                                  bias.scale, output.scale);
-          [output_multiplier, output_shift] = QuantizeMultiplierSmallerThanOne(real_multiplier);
+          // [output_multiplier, output_shift] = QuantizeMultiplierSmallerThanOne(real_multiplier);
+          quantizeMultiplier = nn_ops.QuantizeMultiplierSmallerThanOne(real_multiplier, output_multiplier, output_shift);
           typedArray = Uint8Array;
         }
 
@@ -719,13 +708,13 @@ export default class PreparedModel {
           OPS_CHECK(input.type === bias.type);
         }
 
-        OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
-        OPS_CHECK(filter.runtimeshape.DimensionsCount() === 4);
-        OPS_CHECK(bias.runtimeshape.DimensionsCount() === 1);
-        OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(filter.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(bias.runtimeshape.DimensionsCount() === 1);
+        // OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
 
-        OPS_CHECK(filter.runtimeshape.Dims(0) === bias.runtimeshape.Dims(0));
-        OPS_CHECK(filter.runtimeshape.Dims(3) === input.runtimeshape.Dims(3));
+        // OPS_CHECK(filter.runtimeshape.Dims(0) === bias.runtimeshape.Dims(0));
+        // OPS_CHECK(filter.runtimeshape.Dims(3) === input.runtimeshape.Dims(3));
 
         // init convParams
         let PaddingValues = {
@@ -744,15 +733,15 @@ export default class PreparedModel {
           input_offset: -input.zeroPoint || 0,
           weights_offset: -filter.zeroPoint || 0,
           output_offset: output.zeroPoint || 0,
-          output_multiplier: output_multiplier,
-          output_shift: -output_shift,
+          output_multiplier: quantizeMultiplier.quantized_multiplier,
+          output_shift: -quantizeMultiplier.shift,
           quantized_activation_min: quantized_activation_min,
           quantized_activation_max: quantized_activation_max
         }
 
         if (output.type === OperandCode.TENSOR_FLOAT32) {
           if (op === OperationCode.CONV_2D) {
-            nn_ops.multiConvFloat32(deice, convParams, 
+            nn_ops.convFloat32(convParams, 
                                     input.runtimeshape, input.value, 
                                     filter.runtimeshape, filter.value, 
                                     bias.runtimeshape, bias.value, 
@@ -772,10 +761,12 @@ export default class PreparedModel {
                            filter.runtimeshape, filter.value, 
                            bias.runtimeshape, bias.value, 
                            output.runtimeshape, output.value,
-                           im2colShape, im2colData, gemm_context);
+                           im2colShape, im2colData);
         }
         im2colShape.delete();
         nn_ops._free(im2colData);
+        // let elapsed = performance.now() - start;
+        // console.log(elapsed);
       } break;
       case OperationCode.DEPTHWISE_CONV_2D:
       case OperationCode.ATROUS_DEPTHWISE_CONV_2D: {
@@ -837,10 +828,15 @@ export default class PreparedModel {
         let output = operands[outputs[0]];
 
         let output_multiplier = 0, output_shift = 0;
+        let quantizeMultiplier = {
+          quantized_multiplier: 0,
+          shift: 0
+        };
         if (output.type === OperandCode.TENSOR_QUANT8_ASYMM) {
           let real_multiplier = GetQuantizedConvolutionMultipler(input.scale, filter.scale, 
                                                                  bias.scale, output.scale);
-          [output_multiplier, output_shift] = QuantizeMultiplierSmallerThanOne(real_multiplier);
+          // [output_multiplier, output_shift] = QuantizeMultiplierSmallerThanOne(real_multiplier);
+          quantizeMultiplier = nn_ops.QuantizeMultiplierSmallerThanOne(real_multiplier, output_multiplier, output_shift);
         }
         let [float_activation_min, float_activation_max,
              quantized_activation_min, quantized_activation_max] = calculateActivationRange(activation, output);
@@ -853,12 +849,12 @@ export default class PreparedModel {
           OPS_CHECK(input.type === bias.type);
         }
 
-        OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
-        OPS_CHECK(filter.runtimeshape.DimensionsCount() === 4);
-        OPS_CHECK(bias.runtimeshape.DimensionsCount() === 1);
-        OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(filter.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(bias.runtimeshape.DimensionsCount() === 1);
+        // OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
 
-        OPS_CHECK(filter.runtimeshape.Dims(3) === bias.runtimeshape.Dims(0));
+        // OPS_CHECK(filter.runtimeshape.Dims(3) === bias.runtimeshape.Dims(0));
 
         // init depthwiseParams
         let PaddingValues = {
@@ -877,8 +873,8 @@ export default class PreparedModel {
           input_offset: -input.zeroPoint || 0,
           weights_offset: -filter.zeroPoint || 0,
           output_offset: output.zeroPoint || 0,
-          output_multiplier: output_multiplier,
-          output_shift: -output_shift,
+          output_multiplier: quantizeMultiplier.quantized_multiplier,
+          output_shift: -quantizeMultiplier.shift,
           quantized_activation_min: quantized_activation_min,
           quantized_activation_max: quantized_activation_max
         }
@@ -893,7 +889,7 @@ export default class PreparedModel {
                                     input.runtimeshape, input.value, 
                                     filter.runtimeshape, filter.value, 
                                     bias.runtimeshape, bias.value, 
-                                    output.runtimeshape, output.value, gemm_context);
+                                    output.runtimeshape, output.value);
         }
       } break;
       case OperationCode.AVERAGE_POOL_2D:
@@ -941,8 +937,8 @@ export default class PreparedModel {
              quantized_activation_min, quantized_activation_max] = calculateActivationRange(activation, output);
 
         // Error check
-        OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
-        OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(input.runtimeshape.DimensionsCount() === 4);
+        // OPS_CHECK(output.runtimeshape.DimensionsCount() === 4);
 
         // init poolParams
         let PaddingValues = {
@@ -1001,7 +997,7 @@ export default class PreparedModel {
           let input_beta_real_multiplier =
               Math.min(1.0 * beta * input.scale * (1 << (31 - kScaledDiffIntegerBits)), -(1 << 31) - 1.0);
           [inputMultiplier, inputLeftShift] = QuantizeMultiplierGreaterThanOne(input_beta_real_multiplier);
-          diffMin = -CalculateInputRadius(kScaledDiffIntegerBits, inputLeftShift);
+          diffMin = -nn_ops.CalculateInputRadius(kScaledDiffIntegerBits, inputLeftShift);
         }
 
         // Error check
@@ -1161,7 +1157,7 @@ export default class PreparedModel {
                                      input.runtimeshape, input.value, 
                                      weights.runtimeshape, weights.value, 
                                      bias.runtimeshape, bias.value, 
-                                     output.runtimeshape, output.value, gemm_context);
+                                     output.runtimeshape, output.value);
         }
       } break;
       case OperationCode.RESIZE_BILINEAR: {
